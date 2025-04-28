@@ -14,6 +14,8 @@ use bitcoin::hashes::HashEngine;
 use bitcoin::hex::DisplayHex;
 use ln::{LnBackend, MockLnBackend};
 use secp256k1::{Keypair, Secp256k1};
+use serde::Deserialize;
+use serde::Serialize;
 use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
 
@@ -25,6 +27,24 @@ struct Server<Ln: LnBackend> {
     /// The server will use this database to store the lockers and their state.
     database: Arc<Mutex<sqlite::Connection>>,
     ln: Ln,
+}
+
+async fn get_locker(
+    Path(locker_id): Path<i64>,
+    state: State<Arc<Server<MockLnBackend>>>,
+) -> Result<Body, error::Error> {
+    let lockers = state.list_lockers().await?;
+    let locker = lockers
+        .iter()
+        .find(|l| l.id == locker_id)
+        .ok_or(error::Error::NotFound)?;
+
+    let body = serde_json::json!({
+        "data": locker,
+        "error": null,
+    });
+
+    Ok(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
 }
 
 /// Returns the available lockers and their state. This will be used to display the lockers to the
@@ -113,9 +133,12 @@ async fn pay_for_usage(
     database.execute(query)?;
 
     let body = serde_json::json!({
-        "locker_id": locker_id,
-        "lease_time": lease_time,
-        "invoice": invoice,
+        "data": {
+            "locker_id": locker_id,
+            "lease_time": lease_time,
+            "invoice": invoice,
+        },
+        "error": null,
     });
 
     Ok(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
@@ -156,6 +179,8 @@ async fn get_pament_receipt(
         signature.to_byte_array().to_upper_hex_string()
     };
 
+    state.set_locker_state(locker_id, "available".to_string()).await?;
+
     let body = serde_json::json!({
         "locker_id": locker_id,
         "start_time": start_time,
@@ -173,6 +198,12 @@ struct PendingPayment {
     locker_id: i64,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct Locker {
+    id: i64,
+    state: String,
+}
+
 impl Server<MockLnBackend> {
     pub async fn run(address: String, keypair: Keypair, database: sqlite::Connection) {
         let listener = match tokio::net::TcpListener::bind(address).await {
@@ -185,8 +216,9 @@ impl Server<MockLnBackend> {
         let router = Router::new()
             .route("/use_locker/{locker_id}", get(use_locker))
             .route("/pay_for_usage/{locker_id}", get(pay_for_usage))
-            .route("/payment_receipt/{locker_id}", get(get_pament_receipt))
+            .route("/payment_receipt/{payment_hash}", get(get_pament_receipt))
             .route("/lockers", get(get_lockers))
+            .route("/lockers/{locker_id}", get(get_locker))
             .layer(
                 CorsLayer::new()
                     .allow_private_network(true)
@@ -275,17 +307,20 @@ impl Server<MockLnBackend> {
         Ok(())
     }
 
-    async fn list_lockers(&self) -> Result<Vec<(String, String)>, error::Error> {
+    async fn list_lockers(&self) -> Result<Vec<Locker>, error::Error> {
         let database = self.database.lock().await;
         let query = "SELECT id, state FROM lockers";
         let mut statement = database.prepare(query)?;
 
         let mut lockers = Vec::new();
         while let sqlite::State::Row = statement.next()? {
-            let id: String = statement.read(0)?;
+            let id: i64 = statement.read(0)?;
             let state: String = statement.read(1)?;
-            lockers.push((id, state));
+            let locker = Locker { id, state };
+
+            lockers.push(locker);
         }
+
         Ok(lockers)
     }
 }
