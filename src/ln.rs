@@ -1,8 +1,10 @@
-use std::{collections::HashMap, sync::{Arc, Mutex}};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use bitcoin::hashes::Hash;
 use serde::{Deserialize, Serialize};
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Invoice {
@@ -59,11 +61,8 @@ impl LnBackend for MockLnBackend {
 
     fn get_invoice_status(&self, hash: String) -> Result<InvoiceStatus, Self::Error> {
         let mut invoices = self.invoices.lock().unwrap();
-        let invoice = invoices
-            .get(&hash)
-            .cloned()
-            .ok_or(())?;
-        
+        let invoice = invoices.get(&hash).cloned().ok_or(())?;
+
         if invoice.1 == InvoiceStatus::Paid {
             return Ok(InvoiceStatus::Paid);
         }
@@ -71,16 +70,13 @@ impl LnBackend for MockLnBackend {
         let r = rand::random::<u8>();
 
         // the invoice is payed given a random distribution, with probability ~0.2
-        let status = if r <  50 {
+        let status = if r < 50 {
             InvoiceStatus::Paid
         } else {
             InvoiceStatus::Unpaid
         };
 
-        invoices.insert(
-            hash.clone(),
-            (invoice.0.clone(), status.clone()),
-        );
+        invoices.insert(hash.clone(), (invoice.0.clone(), status.clone()));
 
         Ok(status)
     }

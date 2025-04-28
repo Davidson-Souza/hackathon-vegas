@@ -6,10 +6,10 @@
 use std::io::Write;
 use std::sync::Arc;
 
-use axum::extract::Path;
 use axum::body::Body;
-use axum::{http::Method, routing::get, Router};
+use axum::extract::Path;
 use axum::extract::State;
+use axum::{http::Method, routing::get, Router};
 use bitcoin::hashes::HashEngine;
 use bitcoin::hex::DisplayHex;
 use ln::{LnBackend, MockLnBackend};
@@ -40,10 +40,10 @@ async fn get_lockers(state: State<Arc<Server<MockLnBackend>>>) -> Result<Body, e
 }
 
 async fn use_locker(
-    axum::extract::Path(locker_id): axum::extract::Path<String>,
+    Path(locker_id): Path<i64>,
     state: State<Arc<Server<MockLnBackend>>>,
 ) -> Result<Body, error::Error> {
-    let locker_state = state.get_locker_state(locker_id.clone()).await?;
+    let locker_state = state.get_locker_state(locker_id).await?;
     if locker_state != "available" {
         let body = serde_json::json!({
             "data": null,
@@ -53,18 +53,25 @@ async fn use_locker(
         return Ok(axum::body::Body::from(serde_json::to_vec(&body).unwrap()));
     }
 
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-    state.set_locker_state(locker_id.clone(), "in_use".to_string()).await?;
-    state.set_locker_start_time(locker_id.clone(), now).await?;
-    
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    state
+        .set_locker_state(locker_id, "in_use".to_string())
+        .await?;
+
+    state.set_locker_start_time(locker_id, now).await?;
+
     let signature = {
         let mut hasher = bitcoin::hashes::sha256::HashEngine::default();
         hasher.write_all(format!("{}{}", locker_id, now).as_bytes())?;
-        
+
         let hash = hasher.midstate().0;
-        let secp =  secp256k1::Secp256k1::new();
+        let secp = secp256k1::Secp256k1::new();
         let signature = secp.sign_schnorr_no_aux_rand(&hash, &state.keypair);
-        
+
         signature.to_byte_array().to_upper_hex_string()
     };
 
@@ -81,24 +88,29 @@ async fn use_locker(
 }
 
 async fn pay_for_usage(
-        axum::extract::Path(locker_id): axum::extract::Path<String>,
-        state: State<Arc<Server<MockLnBackend>>>,
-) -> Result<Body, error::Error>{
-    let locker_state = state.get_locker_state(locker_id.clone()).await?;
+    Path(locker_id): Path<i64>,
+    state: State<Arc<Server<MockLnBackend>>>,
+) -> Result<Body, error::Error> {
+    let locker_state = state.get_locker_state(locker_id).await?;
     if locker_state != "in_use" {
         return Err(error::Error::BadRequest);
     }
 
     let start_time = state.get_locker_start_time(locker_id.clone()).await?;
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     let lease_time = now - start_time;
-    
-    let invoice = state.ln.get_invoice(lease_time).map_err(|_| error::Error::BadRequest)?;
-    
+
+    let invoice = state
+        .ln
+        .get_invoice(lease_time)
+        .map_err(|_| error::Error::BadRequest)?;
+
     let database = state.database.lock().await;
     let query = format!("INSERT INTO pending_payments (amount, payment_hash, status, locker_id) VALUES ({}, '{}', 'pending', '{}')", lease_time, invoice.payment_hash, locker_id);
     database.execute(query)?;
-
 
     let body = serde_json::json!({
         "locker_id": locker_id,
@@ -116,28 +128,31 @@ async fn get_pament_receipt(
     Path(payment_hash): Path<String>,
     state: State<Arc<Server<MockLnBackend>>>,
 ) -> Result<Body, error::Error> {
-    let payment_status = state.ln.get_invoice_status(payment_hash.clone()).map_err(|_| error::Error::BadRequest)?;
+    let payment_status = state
+        .ln
+        .get_invoice_status(payment_hash.clone())
+        .map_err(|_| error::Error::BadRequest)?;
 
     if payment_status != ln::InvoiceStatus::Paid {
         return Err(error::Error::BadRequest);
     }
-    
-    let PendingPayment {
-        locker_id,
-        ..
-    } = state.get_payment(payment_hash.clone()).await?;
+
+    let PendingPayment { locker_id, .. } = state.get_payment(payment_hash.clone()).await?;
 
     let start_time = state.get_locker_start_time(locker_id.clone()).await?;
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-    
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
     let signature = {
         let mut hasher = bitcoin::hashes::sha256::HashEngine::default();
         hasher.write_all(format!("{}{}", locker_id, now).as_bytes())?;
-        
+
         let hash = hasher.midstate().0;
-        let secp =  secp256k1::Secp256k1::new();
+        let secp = secp256k1::Secp256k1::new();
         let signature = secp.sign_schnorr_no_aux_rand(&hash, &state.keypair);
-        
+
         signature.to_byte_array().to_upper_hex_string()
     };
 
@@ -155,7 +170,7 @@ struct PendingPayment {
     amount: u64,
     payment_hash: String,
     status: String,
-    locker_id: String,
+    locker_id: i64,
 }
 
 impl Server<MockLnBackend> {
@@ -187,11 +202,8 @@ impl Server<MockLnBackend> {
             .await
             .expect("failed to start rpc server");
     }
-    
-    async fn get_payment(
-        &self,
-        payment_hash: String,
-    ) -> Result<PendingPayment, error::Error> {
+
+    async fn get_payment(&self, payment_hash: String) -> Result<PendingPayment, error::Error> {
         let database = self.database.lock().await;
         let query = format!("SELECT amount, payment_hash, status, locker_id FROM pending_payments WHERE payment_hash = '{}'", payment_hash);
         let mut statement = database.prepare(query)?;
@@ -203,8 +215,8 @@ impl Server<MockLnBackend> {
         let amount: u64 = statement.read::<i64, _>(0)? as u64;
         let payment_hash: String = statement.read(1)?;
         let status: String = statement.read(2)?;
-        let locker_id: String = statement.read(3)?;
-        
+        let locker_id: i64 = statement.read(3)?;
+
         Ok(PendingPayment {
             amount,
             payment_hash,
@@ -213,10 +225,7 @@ impl Server<MockLnBackend> {
         })
     }
 
-    async fn get_locker_state(
-        &self,
-        locker_id: String,
-    ) -> Result<String, error::Error> {
+    async fn get_locker_state(&self, locker_id: i64) -> Result<String, error::Error> {
         let database = self.database.lock().await;
         let query = format!("SELECT state FROM lockers WHERE id = '{}'", locker_id);
         let mut statement = database.prepare(query)?;
@@ -229,21 +238,17 @@ impl Server<MockLnBackend> {
         Ok(state)
     }
 
-    async fn set_locker_state(
-        &self,
-        locker_id: String,
-        state: String,
-    ) -> Result<(), error::Error> {
+    async fn set_locker_state(&self, locker_id: i64, state: String) -> Result<(), error::Error> {
         let database = self.database.lock().await;
-        let query = format!("UPDATE lockers SET state = '{}' WHERE id = '{}'", state, locker_id);
+        let query = format!(
+            "UPDATE lockers SET state = '{}' WHERE id = '{}'",
+            state, locker_id
+        );
         database.execute(query)?;
         Ok(())
     }
 
-    async fn get_locker_start_time(
-        &self,
-        locker_id: String,
-    ) -> Result<u64, error::Error> {
+    async fn get_locker_start_time(&self, locker_id: i64) -> Result<u64, error::Error> {
         let database = self.database.lock().await;
         let query = format!("SELECT start_time FROM lockers WHERE id = '{}'", locker_id);
         let mut statement = database.prepare(query)?;
@@ -258,18 +263,19 @@ impl Server<MockLnBackend> {
 
     async fn set_locker_start_time(
         &self,
-        locker_id: String,
+        locker_id: i64,
         start_time: u64,
     ) -> Result<(), error::Error> {
         let database = self.database.lock().await;
-        let query = format!("UPDATE lockers SET start_time = {} WHERE id = '{}'", start_time, locker_id);
+        let query = format!(
+            "UPDATE lockers SET start_time = {} WHERE id = '{}'",
+            start_time, locker_id
+        );
         database.execute(query)?;
         Ok(())
     }
 
-    async fn list_lockers(
-        &self,
-    ) -> Result<Vec<(String, String)>, error::Error> {
+    async fn list_lockers(&self) -> Result<Vec<(String, String)>, error::Error> {
         let database = self.database.lock().await;
         let query = "SELECT id, state FROM lockers";
         let mut statement = database.prepare(query)?;
@@ -282,7 +288,6 @@ impl Server<MockLnBackend> {
         }
         Ok(lockers)
     }
-
 }
 
 mod error;
@@ -292,7 +297,7 @@ mod ln;
 async fn main() {
     let database = sqlite::open(":memory:").unwrap();
     database
-        .execute("CREATE TABLE IF NOT EXISTS lockers (id TEXT PRIMARY KEY, state TEXT NOT NULL, start_time INTEGER NOT NULL)")
+        .execute("CREATE TABLE IF NOT EXISTS lockers (id INTEGER PRIMARY KEY AUTOINCREMENT, state TEXT NOT NULL, start_time INTEGER NOT NULL)")
         .unwrap();
 
     // create the table pending payments
@@ -302,14 +307,17 @@ async fn main() {
 
     // add two lockers to the database
     database
-        .execute("INSERT OR IGNORE INTO lockers (id, state, start_time) VALUES ('locker1', 'available', 0)")
+        .execute("INSERT OR IGNORE INTO lockers (state, start_time) VALUES ('available', 0)")
         .unwrap();
     database
-        .execute("INSERT OR IGNORE INTO lockers (id, state, start_time) VALUES ('locker2', 'available', 0)")
+        .execute("INSERT OR IGNORE INTO lockers (state, start_time) VALUES ('available', 0)")
         .unwrap();
-    
-    let keypair = Keypair::from_seckey_str(&Secp256k1::default(), "0000000000000000000000000000000000000000000000000000000000000001")
-        .expect("failed to create keypair");
+
+    let keypair = Keypair::from_seckey_str(
+        &Secp256k1::default(),
+        "0000000000000000000000000000000000000000000000000000000000000001",
+    )
+    .expect("failed to create keypair");
 
     // create the server
     Server::run("0.0.0.0:8080".to_string(), keypair, database).await;

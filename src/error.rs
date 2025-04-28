@@ -42,4 +42,3 @@ impl IntoResponse for Error {
         }
     }
 }
-
