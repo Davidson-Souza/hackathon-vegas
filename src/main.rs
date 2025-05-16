@@ -3,16 +3,20 @@
 //! server. This JWT will allow the user to open the locker, both for storing things and for
 //! retrieving things after a certain time.
 
+use std::env;
 use std::io::Write;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::Path;
 use axum::extract::State;
+use axum::routing::post;
 use axum::{http::Method, routing::get, Router};
 use bitcoin::hashes::HashEngine;
 use bitcoin::hex::DisplayHex;
-use ln::{LnBackend, MockLnBackend};
+use ln::LnBackend;
+use ln::PhoenixdClient;
 use secp256k1::{Keypair, Secp256k1};
 use serde::Deserialize;
 use serde::Serialize;
@@ -31,7 +35,7 @@ struct Server<Ln: LnBackend> {
 
 async fn get_locker(
     Path(locker_id): Path<i64>,
-    state: State<Arc<Server<MockLnBackend>>>,
+    state: State<Arc<Server<PhoenixdClient>>>,
 ) -> Result<Body, error::Error> {
     let lockers = state.list_lockers().await?;
     let locker = lockers
@@ -49,7 +53,7 @@ async fn get_locker(
 
 /// Returns the available lockers and their state. This will be used to display the lockers to the
 /// user.
-async fn get_lockers(state: State<Arc<Server<MockLnBackend>>>) -> Result<Body, error::Error> {
+async fn get_lockers(state: State<Arc<Server<PhoenixdClient>>>) -> Result<Body, error::Error> {
     let lockers = state.list_lockers().await?;
     let body = serde_json::json!({
         "data": lockers,
@@ -61,7 +65,7 @@ async fn get_lockers(state: State<Arc<Server<MockLnBackend>>>) -> Result<Body, e
 
 async fn use_locker(
     Path(locker_id): Path<i64>,
-    state: State<Arc<Server<MockLnBackend>>>,
+    state: State<Arc<Server<PhoenixdClient>>>,
 ) -> Result<Body, error::Error> {
     let locker_state = state.get_locker_state(locker_id).await?;
     if locker_state != "available" {
@@ -109,7 +113,7 @@ async fn use_locker(
 
 async fn pay_for_usage(
     Path(locker_id): Path<i64>,
-    state: State<Arc<Server<MockLnBackend>>>,
+    state: State<Arc<Server<PhoenixdClient>>>,
 ) -> Result<Body, error::Error> {
     let locker_state = state.get_locker_state(locker_id).await?;
     if locker_state != "in_use" {
@@ -126,7 +130,7 @@ async fn pay_for_usage(
     let invoice = state
         .ln
         .get_invoice(lease_time)
-        .map_err(|_| error::Error::BadRequest)?;
+        .map_err(|_| error::Error::Server)?;
 
     let database = state.database.lock().await;
     let query = format!("INSERT INTO pending_payments (amount, payment_hash, status, locker_id) VALUES ({}, '{}', 'pending', '{}')", lease_time, invoice.payment_hash, locker_id);
@@ -149,7 +153,7 @@ async fn pay_for_usage(
 /// current timestamp. The client will use this receipt to unlock the locker.
 async fn get_pament_receipt(
     Path(payment_hash): Path<String>,
-    state: State<Arc<Server<MockLnBackend>>>,
+    state: State<Arc<Server<PhoenixdClient>>>,
 ) -> Result<Body, error::Error> {
     let payment_status = state
         .ln
@@ -179,8 +183,6 @@ async fn get_pament_receipt(
         signature.to_byte_array().to_upper_hex_string()
     };
 
-    state.set_locker_state(locker_id, "available".to_string()).await?;
-
     let body = serde_json::json!({
         "locker_id": locker_id,
         "start_time": start_time,
@@ -188,6 +190,37 @@ async fn get_pament_receipt(
     });
 
     Ok(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+}
+
+async fn update_locker_open(
+    state: State<Arc<Server<PhoenixdClient>>>,
+    body: axum::Json<UpdateLockerOpen>,
+) -> Result<Body, error::Error> {
+    let locker_id = body.locker_id;
+    let signature = secp256k1::schnorr::Signature::from_str(&body.signature).map_err(|_| error::Error::BadRequest)?;
+    let pk = state.get_locker_pk(locker_id).await?;
+    
+    let secp = secp256k1::Secp256k1::new();
+
+    // hash the timestamp and locker_id, verify the signature over the hash
+    let mut hasher = bitcoin::hashes::sha256::HashEngine::default();
+    hasher.write_all(format!("{}{}", locker_id, body.timestamp).as_bytes())?;
+
+    let hash = hasher.midstate().0;
+    let pk = secp256k1::XOnlyPublicKey::from_str(&pk).map_err(|_| error::Error::BadRequest)?;
+    secp.verify_schnorr(&signature, &hash, &pk).map_err(|_| error::Error::BadRequest)?;
+
+
+    state.set_locker_state(locker_id, "available".to_string()).await?;
+    Ok(axum::body::Body::from("Locker opened"))
+}
+
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct UpdateLockerOpen {
+    locker_id: i64,
+    signature: String,
+    timestamp: u64,
 }
 
 #[allow(dead_code)]
@@ -204,8 +237,8 @@ struct Locker {
     state: String,
 }
 
-impl Server<MockLnBackend> {
-    pub async fn run(address: String, keypair: Keypair, database: sqlite::Connection) {
+impl Server<PhoenixdClient> {
+    pub async fn run(address: String, keypair: Keypair, database: sqlite::Connection, ln: PhoenixdClient) {
         let listener = match tokio::net::TcpListener::bind(address).await {
             Ok(listener) => listener,
             Err(_) => {
@@ -219,6 +252,7 @@ impl Server<MockLnBackend> {
             .route("/payment_receipt/{payment_hash}", get(get_pament_receipt))
             .route("/lockers", get(get_lockers))
             .route("/lockers/{locker_id}", get(get_locker))
+            .route("/update_locker_open", post(update_locker_open))
             .layer(
                 CorsLayer::new()
                     .allow_private_network(true)
@@ -227,12 +261,28 @@ impl Server<MockLnBackend> {
             .with_state(Arc::new(Server {
                 keypair,
                 database: Arc::new(Mutex::new(database)),
-                ln: MockLnBackend::new(),
+                ln,
             }));
 
         axum::serve(listener, router)
             .await
             .expect("failed to start rpc server");
+    }
+    
+    async fn get_locker_pk(
+        &self,
+        locker_id: i64,
+    ) -> Result<String, error::Error> {
+        let database = self.database.lock().await;
+        let query = format!("SELECT pk FROM lockers WHERE id = '{}'", locker_id);
+        let mut statement = database.prepare(query)?;
+
+        let sqlite::State::Row = statement.next()? else {
+            return Err(error::Error::NotFound);
+        };
+
+        let pk: String = statement.read(0)?;
+        Ok(pk)
     }
 
     async fn get_payment(&self, payment_hash: String) -> Result<PendingPayment, error::Error> {
@@ -329,10 +379,17 @@ mod error;
 mod ln;
 
 #[tokio::main]
-async fn main() {
+async fn main() { 
+    let password = env::var("PASSWORD").expect("PASSWORD not set");
+
+    let phoenix = PhoenixdClient::new(
+        "http://127.0.0.1:9740".to_string(),
+        base64::encode(format!(":{password}"))
+    );
+
     let database = sqlite::open(":memory:").unwrap();
     database
-        .execute("CREATE TABLE IF NOT EXISTS lockers (id INTEGER PRIMARY KEY AUTOINCREMENT, state TEXT NOT NULL, start_time INTEGER NOT NULL)")
+        .execute("CREATE TABLE IF NOT EXISTS lockers (id INTEGER PRIMARY KEY AUTOINCREMENT, pk TEXT NOT NULL, state TEXT NOT NULL, start_time INTEGER NOT NULL)")
         .unwrap();
 
     // create the table pending payments
@@ -342,10 +399,11 @@ async fn main() {
 
     // add two lockers to the database
     database
-        .execute("INSERT OR IGNORE INTO lockers (state, start_time) VALUES ('available', 0)")
+        .execute("INSERT OR IGNORE INTO lockers (state, start_time, pk) VALUES ('available', 0, '03933884aaf1d6b108397e5efe5c86bcf2d8ca8d2f700eda99db9214fc2712b134')")
         .unwrap();
+
     database
-        .execute("INSERT OR IGNORE INTO lockers (state, start_time) VALUES ('available', 0)")
+        .execute("INSERT OR IGNORE INTO lockers (state, start_time, pk) VALUES ('available', 0, '03933884aaf1d6b108397e5efe5c86bcf2d8ca8d2f700eda99db9214fc2712b134')")
         .unwrap();
 
     let keypair = Keypair::from_seckey_str(
@@ -355,5 +413,5 @@ async fn main() {
     .expect("failed to create keypair");
 
     // create the server
-    Server::run("0.0.0.0:8080".to_string(), keypair, database).await;
+    Server::run("0.0.0.0:8080".to_string(), keypair, database, phoenix).await;
 }

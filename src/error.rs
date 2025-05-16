@@ -6,6 +6,7 @@ pub enum Error {
     BadRequest,
     DbError,
     Hasher,
+    Server,
 }
 
 impl From<std::io::Error> for Error {
@@ -38,6 +39,10 @@ impl IntoResponse for Error {
             Error::Hasher => axum::http::Response::builder()
                 .status(500)
                 .body(axum::body::Body::from("Hasher Error"))
+                .unwrap(),
+            Error::Server => axum::http::Response::builder()
+                .status(500)
+                .body(axum::body::Body::from("Server Error"))
                 .unwrap(),
         }
     }
