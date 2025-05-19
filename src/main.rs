@@ -399,11 +399,11 @@ async fn main() {
 
     // add two lockers to the database
     database
-        .execute("INSERT OR IGNORE INTO lockers (state, start_time, pk) VALUES ('available', 0, '79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798')")
+        .execute("INSERT OR IGNORE INTO lockers (state, start_time, pk) VALUES ('available', 0, 'c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5')")
         .unwrap();
 
     database
-        .execute("INSERT OR IGNORE INTO lockers (state, start_time, pk) VALUES ('available', 0, '79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798')")
+        .execute("INSERT OR IGNORE INTO lockers (state, start_time, pk) VALUES ('available', 0, 'c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5')")
         .unwrap();
 
     let keypair = Keypair::from_seckey_str(
