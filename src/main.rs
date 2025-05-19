@@ -399,11 +399,11 @@ async fn main() {
 
     // add two lockers to the database
     database
-        .execute("INSERT OR IGNORE INTO lockers (state, start_time, pk) VALUES ('available', 0, '03933884aaf1d6b108397e5efe5c86bcf2d8ca8d2f700eda99db9214fc2712b134')")
+        .execute("INSERT OR IGNORE INTO lockers (state, start_time, pk) VALUES ('available', 0, '79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798')")
         .unwrap();
 
     database
-        .execute("INSERT OR IGNORE INTO lockers (state, start_time, pk) VALUES ('available', 0, '03933884aaf1d6b108397e5efe5c86bcf2d8ca8d2f700eda99db9214fc2712b134')")
+        .execute("INSERT OR IGNORE INTO lockers (state, start_time, pk) VALUES ('available', 0, '79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798')")
         .unwrap();
 
     let keypair = Keypair::from_seckey_str(
@@ -412,6 +412,11 @@ async fn main() {
     )
     .expect("failed to create keypair");
 
+    println!("[+] Keypair created");
+    println!("[+] Server pubkey: {}", keypair.x_only_public_key().0.to_string());
+    println!("[+] Database created");
+    println!("[+] Phoenix client created");
+    println!("[+] Starting server...");
     // create the server
     Server::run("0.0.0.0:8080".to_string(), keypair, database, phoenix).await;
 }
