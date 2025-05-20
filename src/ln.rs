@@ -157,7 +157,7 @@ impl LnBackend for PhoenixdClient {
         let url = format!("{}/createinvoice", self.host);
         let response = minreq::post(url).with_body(
             format!(
-                "\rdescription=Test invoice&amount={amount}&expirySeconds=3600",
+                "\rdescription=Test invoice&amountSat={amount}&expirySeconds=3600",
             )
         )
         .with_header("Content-Type", "application/x-www-form-urlencoded")
